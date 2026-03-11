@@ -9,7 +9,8 @@ import json
 from datetime import date, datetime, timedelta
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from ..models import Transaction, Subscription, TransactionType, TransactionCategory
+from ..models import Transaction, Subscription, TransactionType, TransactionCategory, Account, AccountType, NetWorthSnapshot
+from .categorizer import auto_categorize
 
 
 # ── Tool Schemas (Anthropic format) ────────────────────────
@@ -53,7 +54,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "create_transaction",
-        "description": "Create a new transaction. Use this when the user wants to log an expense or income.",
+        "description": "Create a new transaction. Use this when the user wants to log an expense or income. If category is omitted or set to 'Auto', the system will intelligently auto-categorize based on the description.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -67,8 +68,8 @@ TOOL_SCHEMAS = [
                 },
                 "category": {
                     "type": "string",
-                    "enum": ["Food", "Transport", "Utilities", "Entertainment", "Shopping", "Income", "Subscription"],
-                    "description": "Transaction category",
+                    "enum": ["Food", "Transport", "Utilities", "Entertainment", "Shopping", "Income", "Subscription", "Auto"],
+                    "description": "Transaction category. Use 'Auto' to let the AI auto-categorize from the description.",
                 },
                 "type": {
                     "type": "string",
@@ -76,7 +77,7 @@ TOOL_SCHEMAS = [
                     "description": "Whether this is income or an expense",
                 },
             },
-            "required": ["description", "amount", "category", "type"],
+            "required": ["description", "amount", "type"],
         },
     },
     {
@@ -158,6 +159,97 @@ TOOL_SCHEMAS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "auto_categorize_transaction",
+        "description": "Intelligently categorize a transaction description into the best matching category. Use this when you want to suggest or verify a category for a transaction.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "The transaction description to categorize (e.g., 'Uber ride to airport')",
+                },
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "name": "get_accounts",
+        "description": "Get all of the user's financial accounts with their current balances, grouped by type (depository, credit, investment, loan).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["depository", "credit", "investment", "loan"],
+                    "description": "Optional: filter accounts by type",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "create_account",
+        "description": "Create a new financial account. Use this when a user wants to add an account like 'Add my Schwab brokerage with $15,000'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Account name (e.g., 'Schwab Brokerage', 'Chase Sapphire', 'Ally Savings')",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["depository", "credit", "investment", "loan"],
+                    "description": "Account type",
+                },
+                "subtype": {
+                    "type": "string",
+                    "description": "Account subtype (e.g., 'Checking', 'Savings', 'Credit Card', 'Brokerage', '401k', 'IRA', 'Stock', 'Mortgage')",
+                },
+                "balance": {
+                    "type": "number",
+                    "description": "Current account balance in dollars",
+                },
+            },
+            "required": ["name", "type"],
+        },
+    },
+    {
+        "name": "update_account",
+        "description": "Update an existing account's name or balance. Use this when a user says things like 'Update my checking to $5,000'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "The account ID to update",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Search by account name if ID not known",
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "New name for the account",
+                },
+                "new_balance": {
+                    "type": "number",
+                    "description": "New balance for the account",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_net_worth",
+        "description": "Get the user's current net worth breakdown showing total assets, total liabilities, and net worth. Also returns the portfolio allocation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -173,6 +265,11 @@ async def execute_tool(tool_name: str, tool_input: dict, db: AsyncSession, user_
         "get_spending_summary": _get_spending_summary,
         "get_category_breakdown": _get_category_breakdown,
         "search_documents": _search_documents,
+        "auto_categorize_transaction": _auto_categorize,
+        "get_accounts": _get_accounts,
+        "create_account": _create_account,
+        "update_account": _update_account,
+        "get_net_worth": _get_net_worth,
     }
 
     handler = handlers.get(tool_name)
@@ -234,9 +331,16 @@ async def _create_transaction(
     user_id: str,
     description: str,
     amount: float,
-    category: str,
     type: str,
+    category: str | None = None,
 ) -> dict:
+    # Auto-categorize if category is missing or "Auto"
+    auto_tagged = False
+    if not category or category == "Auto":
+        result = auto_categorize(description)
+        category = result["category"]
+        auto_tagged = True
+    
     tx = Transaction(
         user_id=user_id,
         description=description,
@@ -248,7 +352,11 @@ async def _create_transaction(
     db.add(tx)
     await db.commit()
     await db.refresh(tx)
-    return {"success": True, "transaction": tx.to_dict()}
+    result = {"success": True, "transaction": tx.to_dict()}
+    if auto_tagged:
+        result["auto_categorized"] = True
+        result["suggested_category"] = category
+    return result
 
 
 async def _get_subscriptions(
@@ -398,4 +506,149 @@ async def _get_category_breakdown(
         "dateRange": {"from": start.isoformat(), "to": end.isoformat()},
         "categories": categories,
         "grandTotal": round(grand_total, 2),
+    }
+
+
+# ── Auto-Categorize Tool ──────────────────────────────────
+
+async def _auto_categorize(
+    db: AsyncSession,
+    user_id: str,
+    description: str,
+) -> dict:
+    result = auto_categorize(description)
+    return {
+        "description": description,
+        "suggestedCategory": result["category"],
+        "confidence": result["confidence"],
+        "method": result["method"],
+        "alternatives": result.get("alternatives", []),
+    }
+
+
+# ── Account Management Tools ──────────────────────────────
+
+async def _get_accounts(
+    db: AsyncSession,
+    user_id: str,
+    type: str | None = None,
+) -> dict:
+    query = select(Account).where(Account.user_id == user_id)
+    if type:
+        query = query.where(Account.type == AccountType(type))
+    query = query.order_by(Account.type)
+    result = await db.execute(query)
+    accounts = result.scalars().all()
+
+    # Group by type for readability
+    grouped = {}
+    total_balance = 0.0
+    for acc in accounts:
+        acc_type = acc.type.value if hasattr(acc.type, 'value') else acc.type
+        if acc_type not in grouped:
+            grouped[acc_type] = []
+        grouped[acc_type].append(acc.to_dict())
+        total_balance += acc.balance
+
+    return {
+        "accounts": [a.to_dict() for a in accounts],
+        "count": len(accounts),
+        "totalBalance": round(total_balance, 2),
+        "byType": grouped,
+    }
+
+
+async def _create_account(
+    db: AsyncSession,
+    user_id: str,
+    name: str,
+    type: str,
+    subtype: str | None = None,
+    balance: float = 0.0,
+) -> dict:
+    # Infer subtype from type if not provided
+    if not subtype:
+        type_to_subtype = {
+            "depository": "Checking",
+            "credit": "Credit Card",
+            "investment": "Brokerage",
+            "loan": "Loan",
+        }
+        subtype = type_to_subtype.get(type, "Other")
+
+    acc = Account(
+        user_id=user_id,
+        name=name,
+        type=AccountType(type),
+        subtype=subtype,
+        balance=balance,
+    )
+    db.add(acc)
+    await db.commit()
+    await db.refresh(acc)
+    return {"success": True, "account": acc.to_dict()}
+
+
+async def _update_account(
+    db: AsyncSession,
+    user_id: str,
+    account_id: str | None = None,
+    name: str | None = None,
+    new_name: str | None = None,
+    new_balance: float | None = None,
+) -> dict:
+    # Find by ID or name
+    if account_id:
+        query = select(Account).where(Account.id == account_id, Account.user_id == user_id)
+    elif name:
+        query = select(Account).where(Account.name.ilike(f"%{name}%"), Account.user_id == user_id)
+    else:
+        return {"error": "Please provide an account_id or name to identify the account."}
+
+    result = await db.execute(query)
+    acc = result.scalar_one_or_none()
+
+    if not acc:
+        return {"error": "Account not found."}
+
+    if new_name:
+        acc.name = new_name
+    if new_balance is not None:
+        acc.balance = new_balance
+
+    db.add(acc)
+    await db.commit()
+    await db.refresh(acc)
+    return {"success": True, "account": acc.to_dict()}
+
+
+async def _get_net_worth(
+    db: AsyncSession,
+    user_id: str,
+) -> dict:
+    result = await db.execute(
+        select(Account).where(Account.user_id == user_id)
+    )
+    accounts = result.scalars().all()
+
+    depository = sum(a.balance for a in accounts if a.type == AccountType.depository)
+    credit = sum(a.balance for a in accounts if a.type == AccountType.credit)
+    investment = sum(a.balance for a in accounts if a.type == AccountType.investment)
+    loan = sum(a.balance for a in accounts if a.type == AccountType.loan)
+
+    total_assets = depository + investment
+    total_liabilities = credit + loan
+    net_worth = total_assets - total_liabilities
+
+    return {
+        "netWorth": round(net_worth, 2),
+        "totalAssets": round(total_assets, 2),
+        "totalLiabilities": round(total_liabilities, 2),
+        "breakdown": {
+            "depository": round(depository, 2),
+            "credit": round(credit, 2),
+            "investment": round(investment, 2),
+            "loan": round(loan, 2),
+        },
+        "accounts": [a.to_dict() for a in accounts],
     }

@@ -12,70 +12,118 @@ from datetime import date, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from .tools import execute_tool
 from .analytics_engine import detect_anomalies, generate_insights, subscription_recommendations
+from .categorizer import auto_categorize
 
 
 # ── Intent patterns ────────────────────────────────────────
+# Order matters for tiebreaking. More specific intents should come first.
+# Each intent also has a 'priority' — higher priority wins when multiple match.
 
 INTENT_PATTERNS = [
+    {
+        "intent": "auto_tag",
+        "patterns": [r"what.*categor", r"categori[sz]e\b", r"tag\b", r"auto.*tag", r"re-?categori", r"which.*categor", r"what.*would.*categor"],
+        "tool": "__auto_tag",
+        "input": {},
+        "priority": 90,
+    },
     {
         "intent": "forecast",
         "patterns": [r"predict", r"forecast", r"future\s*(spend|cost)", r"next\s*(month|week)"],
         "tool": "__forecast",
         "input": {},
+        "priority": 50,
     },
     {
         "intent": "get_subscriptions",
         "patterns": [r"subscri", r"recurring", r"monthly\s*(payment|bill|charge)"],
         "tool": "get_subscriptions",
         "input": {"active_only": True},
+        "priority": 50,
     },
     {
-        "intent": "spending_summary",
-        "patterns": [r"spend", r"summary", r"overview", r"how\s*much", r"total"],
-        "tool": "get_spending_summary",
-        "input": {"period": "month"},
-    },
-    {
-        "intent": "category_breakdown",
-        "patterns": [r"categor", r"breakdown", r"where.*money", r"expense.*by"],
-        "tool": "get_category_breakdown",
+        "intent": "create_account",
+        "patterns": [r"add.*(?:my|a|an|the)?\s*(?:account|brokerage|savings|checking|credit|ira|roth|401)", r"open.*account", r"new.*account", r"create.*account"],
+        "tool": "__create_account",
         "input": {},
-    },
-    {
-        "intent": "get_transactions",
-        "patterns": [r"transaction", r"recent", r"history", r"show.*purchas", r"list.*expens"],
-        "tool": "get_transactions",
-        "input": {"limit": 10},
+        "priority": 80,
     },
     {
         "intent": "create_transaction",
         "patterns": [r"add.*(expense|transaction|income)", r"log.*(expense|purchase)", r"spent.*\$", r"paid.*\$", r"bought"],
         "tool": "__create_tx",
         "input": {},
+        "priority": 75,
+    },
+    {
+        "intent": "get_net_worth",
+        "patterns": [r"net\s*worth", r"total.*(?:balance|value|worth)", r"how.*much.*(?:have|own|worth)"],
+        "tool": "get_net_worth",
+        "input": {},
+        "priority": 70,
+    },
+    {
+        "intent": "investment_summary",
+        "patterns": [r"invest", r"portfolio", r"stock", r"401k", r"ira", r"brokerage"],
+        "tool": "__investment_summary",
+        "input": {},
+        "priority": 60,
+    },
+    {
+        "intent": "spending_summary",
+        "patterns": [r"spend", r"summary", r"overview", r"how\s*much", r"total"],
+        "tool": "get_spending_summary",
+        "input": {"period": "month"},
+        "priority": 40,
+    },
+    {
+        "intent": "category_breakdown",
+        "patterns": [r"breakdown", r"where.*money", r"expense.*by", r"categor.*breakdown", r"by.*categor", r"spending.*categor"],
+        "tool": "get_category_breakdown",
+        "input": {},
+        "priority": 45,
+    },
+    {
+        "intent": "get_transactions",
+        "patterns": [r"transaction", r"recent", r"history", r"show.*purchas", r"list.*expens"],
+        "tool": "get_transactions",
+        "input": {"limit": 10},
+        "priority": 40,
     },
     {
         "intent": "cancel_subscription",
         "patterns": [r"cancel.*subscri", r"remove.*subscri", r"stop.*subscri"],
         "tool": None,
         "input": {},
+        "priority": 70,
     },
     {
         "intent": "anomalies",
         "patterns": [r"anomal", r"unusual", r"suspicious", r"weird", r"strange", r"spike", r"flagged"],
         "tool": "__anomalies",
         "input": {},
+        "priority": 50,
     },
     {
         "intent": "savings",
         "patterns": [r"saving", r"budget", r"income.*vs", r"net\b", r"how.*doing", r"financial.*health"],
         "tool": "__insights",
         "input": {},
+        "priority": 40,
     },
     {
         "intent": "sub_optimize",
         "patterns": [r"optimi", r"too.*much.*subscri", r"cut.*cost", r"save.*subscri", r"reduce"],
         "tool": "__sub_optimize",
         "input": {},
+        "priority": 50,
+    },
+    {
+        "intent": "get_accounts",
+        "patterns": [r"(?:show|list|my).*account", r"account.*balance"],
+        "tool": "get_accounts",
+        "input": {},
+        "priority": 35,
     },
 ]
 
@@ -91,13 +139,38 @@ def is_demo_mode(api_key: str) -> bool:
 
 
 def detect_intent(message: str) -> dict | None:
-    """Match user message to an intent using keyword patterns."""
+    """
+    Match user message to the best intent using scored pattern matching.
+    
+    Instead of first-match-wins, this scores all matching intents and picks
+    the one with the highest score (pattern specificity + intent priority).
+    """
     lower = message.lower()
+    scored_matches = []
+    
     for pattern_group in INTENT_PATTERNS:
+        best_match_len = 0
+        matched = False
         for pattern in pattern_group["patterns"]:
-            if re.search(pattern, lower):
-                return pattern_group
-    return None
+            m = re.search(pattern, lower)
+            if m:
+                matched = True
+                match_len = len(m.group())
+                if match_len > best_match_len:
+                    best_match_len = match_len
+        
+        if matched:
+            # Score = intent priority + match-length bonus (longer = more specific)
+            priority = pattern_group.get("priority", 50)
+            score = priority + min(30, best_match_len * 2)
+            scored_matches.append((score, pattern_group))
+    
+    if not scored_matches:
+        return None
+    
+    # Return the highest-scoring intent
+    scored_matches.sort(key=lambda x: x[0], reverse=True)
+    return scored_matches[0][1]
 
 
 def _parse_time_range(message: str) -> dict:
@@ -211,11 +284,56 @@ def _format_category_breakdown(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_accounts(data: dict) -> str:
+    """Format accounts list into a readable response."""
+    accounts = data.get("accounts", [])
+    if not accounts:
+        return "You don't have any accounts set up yet."
+
+    type_emoji = {
+        "depository": "🏦",
+        "credit": "💳",
+        "investment": "📈",
+        "loan": "🏠",
+    }
+
+    lines = [f"🏦 Your Financial Accounts ({data['count']} total):\n"]
+    by_type = data.get("byType", {})
+    for acc_type, accs in by_type.items():
+        emoji = type_emoji.get(acc_type, "📋")
+        lines.append(f"\n{emoji} {acc_type.title()}:")
+        for acc in accs:
+            lines.append(f"  • {acc['name']} — ${acc['balance']:,.2f}")
+    lines.append(f"\n💵 Total Balance: ${data['totalBalance']:,.2f}")
+    return "\n".join(lines)
+
+
+def _format_net_worth(data: dict) -> str:
+    """Format net worth breakdown into a readable response."""
+    breakdown = data.get("breakdown", {})
+    nw = data.get("netWorth", 0)
+    emoji = "📈" if nw >= 0 else "📉"
+
+    lines = [
+        f"💰 Net Worth Summary\n",
+        f"🏦 Depository:   ${breakdown.get('depository', 0):,.2f}",
+        f"📈 Investments:  ${breakdown.get('investment', 0):,.2f}",
+        f"💳 Credit:       ${breakdown.get('credit', 0):,.2f}",
+        f"🏠 Loans:        ${breakdown.get('loan', 0):,.2f}",
+        f"\n✅ Total Assets:      ${data.get('totalAssets', 0):,.2f}",
+        f"❌ Total Liabilities: ${data.get('totalLiabilities', 0):,.2f}",
+        f"{emoji} Net Worth:          ${nw:,.2f}",
+    ]
+    return "\n".join(lines)
+
+
 FORMATTERS = {
     "get_transactions": _format_transactions,
     "get_subscriptions": _format_subscriptions,
     "get_spending_summary": _format_spending_summary,
     "get_category_breakdown": _format_category_breakdown,
+    "get_accounts": _format_accounts,
+    "get_net_worth": _format_net_worth,
 }
 
 
@@ -307,7 +425,12 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
             "  📈  \"Category breakdown\"\n"
             "  🔍  \"Any unusual spending?\"\n"
             "  💡  \"How are my savings?\"\n"
-            "  🔧  \"Optimize my subscriptions\"\n\n"
+            "  🔧  \"Optimize my subscriptions\"\n"
+            "  🏦  \"Show my accounts\"\n"
+            "  💰  \"What's my net worth?\"\n"
+            "  📈  \"Show my investments\"\n"
+            "  🏦  \"Add my Schwab brokerage with $15,000\"\n"
+            "  🏷️  \"What category is Uber?\"\n\n"
             "💡 To enable full AI conversations, add your Anthropic API key to backend/.env",
             [],
         )
@@ -342,6 +465,110 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
         result_data = await forecast_spending(db, user_id, forecast_days=30)
         return _format_forecast(result_data), []
 
+    # ── Auto-tag intent ──
+    if tool_name == "__auto_tag":
+        # Extract a specific description to categorize, or show capabilities
+        desc_match = re.search(r"(?:categori[sz]e|tag|what.*categor[y].*(?:is|for)?)\s+(.+)", message, re.IGNORECASE)
+        if desc_match:
+            desc = desc_match.group(1).strip().strip('"\'?')
+            result = auto_categorize(desc)
+            alts = result.get("alternatives", [])
+            alt_text = ""
+            if alts:
+                alt_text = "\n\nAlternatives: " + ", ".join(f"{a['category']} ({a['confidence']:.0%})" for a in alts)
+            return (
+                f"🏷️ Category Suggestion for \"{desc}\":\n\n"
+                f"📁 {result['category']} (confidence: {result['confidence']:.0%})\n"
+                f"🔧 Method: {result['method']}{alt_text}",
+                [],
+            )
+        else:
+            return (
+                "🏷️ I can auto-categorize transactions for you!\n\n"
+                "Try asking:\n"
+                "  • \"What category is Uber?\"\n"
+                "  • \"Categorize Starbucks\"\n"
+                "  • \"What category for Amazon purchase?\"\n",
+                [],
+            )
+
+    # ── Create account intent ──
+    if tool_name == "__create_account":
+        # Parse natural language: "Add my Schwab brokerage with $15,000"
+        lower = message.lower()
+        
+        # Extract balance
+        amount_match = re.search(r"\$?([\d,]+(?:\.\d{1,2})?)", message)
+        balance = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
+        
+        # Extract account name — remove common words
+        name_text = re.sub(r"\$?[\d,]+(?:\.\d{1,2})?", "", message)
+        name_text = re.sub(r"\b(add|create|open|new|my|a|an|the|with|account|balance|of)\b", "", name_text, flags=re.I)
+        name_text = " ".join(name_text.split()).strip(" .,!?")
+        
+        # Detect account type from keywords
+        acc_type = "depository"
+        subtype = "Checking"
+        if any(w in lower for w in ["brokerage", "stock", "invest", "portfolio", "etf", "mutual fund"]):
+            acc_type = "investment"
+            subtype = "Brokerage"
+        elif any(w in lower for w in ["401k", "401(k)", "retirement"]):
+            acc_type = "investment"
+            subtype = "401k"
+        elif any(w in lower for w in ["ira", "roth"]):
+            acc_type = "investment"
+            subtype = "IRA"
+        elif any(w in lower for w in ["credit", "visa", "mastercard", "amex"]):
+            acc_type = "credit"
+            subtype = "Credit Card"
+        elif any(w in lower for w in ["savings", "high yield", "hysa"]):
+            acc_type = "depository"
+            subtype = "Savings"
+        elif any(w in lower for w in ["mortgage", "loan", "debt"]):
+            acc_type = "loan"
+            subtype = "Loan"
+        elif any(w in lower for w in ["checking"]):
+            acc_type = "depository"
+            subtype = "Checking"
+        
+        acc_name = name_text.title() if name_text and len(name_text) > 1 else f"New {subtype}"
+        
+        result_str = await execute_tool("create_account", {
+            "name": acc_name,
+            "type": acc_type,
+            "subtype": subtype,
+            "balance": balance,
+        }, db, user_id)
+        result_data = json.loads(result_str)
+        
+        if result_data.get("success"):
+            acc = result_data["account"]
+            return (
+                f"✅ Account Created!\n\n"
+                f"🏦 {acc['name']}\n"
+                f"📋 Type: {acc['type'].title()} ({acc.get('subtype', '')})\n"
+                f"💰 Balance: ${acc['balance']:,.2f}",
+                [{"name": "create_account", "input": {"name": acc_name, "type": acc_type}, "result": result_data}],
+            )
+        return f"❌ Failed to create account: {result_data.get('error', 'Unknown error')}", []
+
+    # ── Investment summary intent ──
+    if tool_name == "__investment_summary":
+        result_str = await execute_tool("get_accounts", {"type": "investment"}, db, user_id)
+        result_data = json.loads(result_str)
+        accounts = result_data.get("accounts", [])
+        
+        if not accounts:
+            return "📈 You don't have any investment accounts yet. Try: \"Add my Schwab brokerage with $15,000\"", []
+        
+        total = sum(a["balance"] for a in accounts)
+        lines = ["📈 Investment Portfolio Summary:\n"]
+        for acc in accounts:
+            pct = (acc["balance"] / total * 100) if total > 0 else 0
+            lines.append(f"  • {acc['name']} — ${acc['balance']:,.2f} ({pct:.1f}%)")
+        lines.append(f"\n💰 Total Portfolio Value: ${total:,.2f}")
+        return "\n".join(lines), [{"name": "get_accounts", "input": {"type": "investment"}, "result": result_data}]
+
     if tool_name == "__create_tx":
         # Parse amount from message: look for $XX.XX or just numbers
         amount_match = re.search(r"\$?([\d,]+(?:\.\d{1,2})?)", message)
@@ -352,19 +579,10 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
         desc = re.sub(r"\b(i |spent|paid|on|for|bought|add|log|expense|transaction)\b", "", desc, flags=re.I)
         desc = " ".join(desc.split()).strip(" .,!?") or "Transaction"
 
-        # Guess category from keywords
-        cat = "Shopping"
-        lower = message.lower()
-        if any(w in lower for w in ["food", "lunch", "dinner", "coffee", "restaurant", "eat", "meal"]):
-            cat = "Food"
-        elif any(w in lower for w in ["uber", "lyft", "gas", "taxi", "bus", "train", "transport"]):
-            cat = "Transport"
-        elif any(w in lower for w in ["electric", "water", "internet", "phone", "util"]):
-            cat = "Utilities"
-        elif any(w in lower for w in ["movie", "game", "netflix", "spotify", "concert", "entertainment"]):
-            cat = "Entertainment"
-        elif any(w in lower for w in ["income", "salary", "earned", "received", "paid me"]):
-            cat = "Income"
+        # Guess category using the smart categorizer
+        cat_result = auto_categorize(message)
+        cat = cat_result["category"]
+        confidence = cat_result["confidence"]
 
         tx_type = "income" if cat == "Income" else "expense"
 
@@ -380,7 +598,7 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
             return (
                 f"✅ Transaction logged!\n\n"
                 f"{emoji} {result_data.get('description', desc)} — ${amount:.2f}\n"
-                f"📁 {cat}  ·  📅 {result_data.get('date', 'Today')}",
+                f"📁 {cat} (confidence: {confidence:.0%})  ·  📅 {result_data.get('date', 'Today')}",
                 [{"name": "create_transaction", "input": {"amount": amount, "description": desc}, "result": result_data}],
             )
         else:
