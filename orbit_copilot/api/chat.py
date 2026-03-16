@@ -16,6 +16,7 @@ from ..services.llm import stream_chat_response, non_streaming_chat, should_esca
 from ..services.tools import execute_tool
 from ..services.demo import is_demo_mode, handle_demo_message
 from ..services.gemini_llm import gemini_chat_response, has_gemini_key
+from ..services.local_llm import local_chat_response
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -153,13 +154,38 @@ async def chat_websocket(websocket: WebSocket, token: str):
                 # Build API messages from plain data (no ORM access needed)
                 api_messages = history_messages + [{"role": "user", "content": user_message}]
 
-                # ── Step 2: Generate response (Anthropic > Gemini > Demo) ──
+                # ── Step 2: Generate response (Local > Anthropic > Gemini > Demo) ──
                 _demo_mode = is_demo_mode(settings.anthropic_api_key)
                 _has_gemini = has_gemini_key()
                 full_text = ""
                 tool_calls_log = []
 
-                if _demo_mode and _has_gemini:
+                if settings.use_local_llm:
+                    # Privacy Mode: Local LLM
+                    async with async_session() as db:
+                        response_text, tool_calls_log = await local_chat_response(
+                            user_message, db, user_id, history=history_messages
+                        )
+
+                    for tc in tool_calls_log:
+                        await websocket.send_json({
+                            "type": "tool_call",
+                            "name": tc["name"],
+                            "input": tc["input"],
+                        })
+                        await websocket.send_json({
+                            "type": "tool_result",
+                            "name": tc["name"],
+                            "result": tc["result"],
+                        })
+
+                    words = response_text.split(' ')
+                    for i, word in enumerate(words):
+                        chunk = word if i == 0 else ' ' + word
+                        full_text += chunk
+                        await websocket.send_json({"type": "text_delta", "text": chunk})
+
+                elif _demo_mode and _has_gemini:
                     # Gemini LLM mode: real AI with function calling
                     async with async_session() as db:
                         response_text, tool_calls_log = await gemini_chat_response(

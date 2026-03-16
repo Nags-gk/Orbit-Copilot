@@ -150,7 +150,44 @@ def auto_categorize(description: str, fallback_to_ai: bool = True) -> dict:
 
 
 def _gemini_categorize(description: str) -> Optional[dict]:
-    """Use Gemini 2.5 Flash to categorize an unknown transaction."""
+    """Use Gemini 2.5 Flash or Local LLM to categorize an unknown transaction."""
+    from .local_llm import settings
+    
+    prompt = (
+        f"Categorize this financial transaction description into EXACTLY one of these categories: "
+        f"Food, Transport, Utilities, Entertainment, Shopping, Subscription, Income.\n\n"
+        f"Transaction: \"{description}\"\n\n"
+        f"Respond with ONLY a JSON object: {{\"category\": \"...\", \"confidence\": 0.0-1.0}}"
+    )
+    
+    if settings.use_local_llm:
+        try:
+            from openai import OpenAI
+            client = OpenAI(base_url=settings.local_model_url, api_key="local")
+            response = client.chat.completions.create(
+                model=settings.local_model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+            result_text = response.choices[0].message.content
+            if result_text:
+                data = json.loads(result_text)
+                valid_categories = {"Food", "Transport", "Utilities", "Entertainment", "Shopping", "Subscription", "Income"}
+                cat = data.get("category", "Shopping")
+                if cat not in valid_categories:
+                    cat = "Shopping"
+                return {
+                    "category": cat,
+                    "confidence": min(1.0, float(data.get("confidence", 0.7))),
+                    "method": "local_ai",
+                    "alternatives": [],
+                }
+        except Exception as e:
+            print(f"Local AI categorization failed: {e}")
+            return None
+            
+    # Fallback to Gemini if not local
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
@@ -160,13 +197,6 @@ def _gemini_categorize(description: str) -> Optional[dict]:
         from google.genai import types
         
         client = genai.Client(api_key=api_key)
-        
-        prompt = (
-            f"Categorize this financial transaction description into EXACTLY one of these categories: "
-            f"Food, Transport, Utilities, Entertainment, Shopping, Subscription, Income.\n\n"
-            f"Transaction: \"{description}\"\n\n"
-            f"Respond with ONLY a JSON object: {{\"category\": \"...\", \"confidence\": 0.0-1.0}}"
-        )
         
         response = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -186,7 +216,7 @@ def _gemini_categorize(description: str) -> Optional[dict]:
             return {
                 "category": cat,
                 "confidence": min(1.0, float(data.get("confidence", 0.7))),
-                "method": "ai",
+                "method": "gemini_ai",
                 "alternatives": [],
             }
     except Exception as e:
