@@ -303,9 +303,22 @@ async def _get_transactions(
     conditions = [Transaction.user_id == user_id]
 
     if category:
-        conditions.append(Transaction.category == TransactionCategory(category))
+        try:
+            # Try exact match, then case-insensitive
+            cat_enum = TransactionCategory(category)
+        except ValueError:
+            category_map = {c.value.lower(): c for c in TransactionCategory}
+            cat_enum = category_map.get(category.lower())
+        
+        if cat_enum:
+            conditions.append(Transaction.category == cat_enum)
+
     if type:
-        conditions.append(Transaction.type == TransactionType(type))
+        try:
+            type_enum = TransactionType(type.lower())
+            conditions.append(Transaction.type == type_enum)
+        except ValueError:
+            pass # Invalid type filter, ignore
     if date_from:
         conditions.append(Transaction.date >= date.fromisoformat(date_from))
     if date_to:
@@ -341,12 +354,45 @@ async def _create_transaction(
         category = result["category"]
         auto_tagged = True
     
+    # Normalize type and category for Enum conversion
+    try:
+        norm_type = type.lower()
+        tx_type_enum = TransactionType(norm_type)
+    except ValueError:
+        # Fallback for common AI spelling/capitalization
+        if "expense" in type.lower():
+            tx_type_enum = TransactionType.expense
+        elif "income" in type.lower():
+            tx_type_enum = TransactionType.income
+        else:
+            raise ValueError(f"Invalid transaction type: {type}")
+
+    # Handle category with case-insensitivity
+    try:
+        # Try exact match first (value)
+        tx_cat_enum = TransactionCategory(category)
+    except ValueError:
+        # Try case-insensitive match against values
+        category_map = {c.value.lower(): c for c in TransactionCategory}
+        if category.lower() in category_map:
+            tx_cat_enum = category_map[category.lower()]
+        else:
+            # Try matching by key (case-insensitive)
+            try:
+                tx_cat_enum = getattr(TransactionCategory, category)
+            except (AttributeError, TypeError):
+                # Default to Shopping if it's an expense, or Income if it's income
+                if tx_type_enum == TransactionType.income:
+                    tx_cat_enum = TransactionCategory.Income
+                else:
+                    tx_cat_enum = TransactionCategory.Shopping
+    
     tx = Transaction(
         user_id=user_id,
         description=description,
         amount=amount,
-        category=TransactionCategory(category),
-        type=TransactionType(type),
+        category=tx_cat_enum,
+        type=tx_type_enum,
         date=date.today(),
     )
     db.add(tx)
@@ -576,10 +622,20 @@ async def _create_account(
         }
         subtype = type_to_subtype.get(type, "Other")
 
+    try:
+        acc_type_enum = AccountType(type.lower())
+    except ValueError:
+        # Fallback for common AI casing
+        if "depository" in type.lower(): acc_type_enum = AccountType.depository
+        elif "credit" in type.lower(): acc_type_enum = AccountType.credit
+        elif "investment" in type.lower(): acc_type_enum = AccountType.investment
+        elif "loan" in type.lower(): acc_type_enum = AccountType.loan
+        else: raise ValueError(f"Invalid account type: {type}")
+
     acc = Account(
         user_id=user_id,
         name=name,
-        type=AccountType(type),
+        type=acc_type_enum,
         subtype=subtype,
         balance=balance,
     )

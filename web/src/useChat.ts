@@ -99,6 +99,11 @@ export function useChat(): UseChatReturn {
                             const lastCallOfName = [...calls].reverse().find(c => c.name === data.name);
                             if (lastCallOfName) {
                                 lastCallOfName.result = data.result;
+                                
+                                // Dispatch refresh event if a transaction was created via AI
+                                if (data.name === 'create_transaction' && data.result?.success) {
+                                    window.dispatchEvent(new Event('transaction-added'));
+                                }
                             }
                             return { ...msg, toolCalls: calls };
                         })
