@@ -11,6 +11,7 @@ import os
 from typing import Optional
 from .tools import TOOL_SCHEMAS, execute_tool
 from .categorizer import auto_categorize
+from ..config import get_settings
 
 
 # ── Convert Anthropic tool schemas to Gemini function declarations ──
@@ -70,7 +71,8 @@ async def gemini_chat_response(
     Returns:
         (response_text, tool_calls_log)
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    settings = get_settings()
+    api_key = settings.gemini_api_key
     if not api_key:
         return "⚠️ No AI API key configured. Please set GEMINI_API_KEY or ANTHROPIC_API_KEY in your backend/.env file.", []
     
@@ -182,5 +184,6 @@ async def gemini_chat_response(
 
 def has_gemini_key() -> bool:
     """Check if a Gemini API key is configured."""
-    key = os.getenv("GEMINI_API_KEY", "")
+    settings = get_settings()
+    key = settings.gemini_api_key
     return bool(key and len(key) > 10)

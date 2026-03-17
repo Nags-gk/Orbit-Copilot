@@ -431,7 +431,7 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
             "  📈  \"Show my investments\"\n"
             "  🏦  \"Add my Schwab brokerage with $15,000\"\n"
             "  🏷️  \"What category is Uber?\"\n\n"
-            "💡 To enable full AI conversations, add your Anthropic API key to backend/.env",
+            "💡 To enable full AI conversations, set USE_LOCAL_LLM=true or add a GEMINI_API_KEY / ANTHROPIC_API_KEY to backend/.env",
             [],
         )
 
