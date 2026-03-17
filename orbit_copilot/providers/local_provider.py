@@ -4,6 +4,7 @@ Local LLM chat backend for Orbit AI.
 When configured, this routes chat through a local OpenAI-compatible
 inference engine like Ollama or LM Studio.
 """
+from __future__ import annotations
 import json
 import os
 from typing import Optional
