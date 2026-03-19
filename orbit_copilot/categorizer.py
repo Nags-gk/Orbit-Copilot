@@ -188,7 +188,7 @@ def _gemini_categorize(description: str) -> Optional[dict]:
             return None
             
     # Fallback to Gemini if not local
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = settings.gemini_api_key
     if not api_key:
         return None
     
