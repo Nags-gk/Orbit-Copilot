@@ -99,15 +99,23 @@ async def chat_websocket(websocket: WebSocket, token: str = None):
         if not _id:
             # We must ensure the user exists
             from ..services.security import get_password_hash
-            user = User(
-                email="local@orbit.ai",
-                hashed_password=get_password_hash("local"),
-                full_name="Local User"
-            )
-            db.add(user)
-            await db.commit()
-            await db.refresh(user)
-            user_id = user.id
+            try:
+                user = User(
+                    email="local@orbit.ai",
+                    hashed_password=get_password_hash("local"),
+                    full_name="Local User"
+                )
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+                user_id = user.id
+            except Exception:
+                await db.rollback()
+                result = await db.execute(select(User.id).where(User.email == "local@orbit.ai"))
+                user_id = result.scalars().first()
+                if not user_id:
+                    result = await db.execute(select(User.id))
+                    user_id = result.scalars().first()
         else:
             user_id = _id
 
