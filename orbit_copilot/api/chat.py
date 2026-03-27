@@ -72,7 +72,7 @@ async def get_conversation(
 
 
 @router.websocket("/ws")
-async def chat_websocket(websocket: WebSocket, token: str):
+async def chat_websocket(websocket: WebSocket, token: str = None):
     """
     WebSocket endpoint for real-time chat streaming.
     
@@ -84,17 +84,32 @@ async def chat_websocket(websocket: WebSocket, token: str):
       - {"type": "done", "conversation_id": "...", "message_id": "..."}
       - {"type": "error", "error": "..."}
     """
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        if not user_id:
-            await websocket.close(code=1008)
-            return
-    except JWTError:
-        await websocket.close(code=1008)
-        return
-
     await websocket.accept()
+
+    # Auto-login bypass
+    user_id = None
+    async with async_session() as db:
+        result = await db.execute(select(User.id).where(User.email == "gptchat0428@gmail.com"))
+        _id = result.scalars().first()
+        
+        if not _id:
+            result = await db.execute(select(User.id))
+            _id = result.scalars().first()
+            
+        if not _id:
+            # We must ensure the user exists
+            from ..services.security import get_password_hash
+            user = User(
+                email="local@orbit.ai",
+                hashed_password=get_password_hash("local"),
+                full_name="Local User"
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+            user_id = user.id
+        else:
+            user_id = _id
 
     try:
         while True:
