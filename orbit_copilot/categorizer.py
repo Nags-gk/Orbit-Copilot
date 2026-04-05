@@ -172,7 +172,9 @@ def _gemini_categorize(description: str) -> Optional[dict]:
             )
             result_text = response.choices[0].message.content
             if result_text:
-                data = json.loads(result_text)
+                from .local_llm import clean_json_response
+                cleaned_text = clean_json_response(result_text)
+                data = json.loads(cleaned_text)
                 valid_categories = {"Food", "Transport", "Utilities", "Entertainment", "Shopping", "Subscription", "Income"}
                 cat = data.get("category", "Shopping")
                 if cat not in valid_categories:
