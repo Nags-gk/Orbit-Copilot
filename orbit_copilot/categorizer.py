@@ -11,7 +11,6 @@ Usage:
     # {"category": "Transport", "confidence": 0.95, "method": "keyword"}
 """
 from __future__ import annotations
-import os
 import re
 import json
 from typing import Optional
@@ -151,7 +150,8 @@ def auto_categorize(description: str, fallback_to_ai: bool = True) -> dict:
 
 def _gemini_categorize(description: str) -> Optional[dict]:
     """Use Gemini 2.5 Flash or Local LLM to categorize an unknown transaction."""
-    from .local_llm import settings
+    from .config import get_settings
+    settings = get_settings()
     
     prompt = (
         f"Categorize this financial transaction description into EXACTLY one of these categories: "
@@ -172,7 +172,7 @@ def _gemini_categorize(description: str) -> Optional[dict]:
             )
             result_text = response.choices[0].message.content
             if result_text:
-                from .local_llm import clean_json_response
+                from .llm_utils import clean_json_response
                 cleaned_text = clean_json_response(result_text)
                 data = json.loads(cleaned_text)
                 valid_categories = {"Food", "Transport", "Utilities", "Entertainment", "Shopping", "Subscription", "Income"}

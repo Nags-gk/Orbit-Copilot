@@ -1,41 +1,69 @@
 """
-Chat router — WebSocket streaming + REST history endpoint.
+Chat router — WebSocket streaming + REST history endpoints.
+
+Wire protocol (unchanged from the in-Orbit version, so Orbit's widget works as is):
+
+  Client sends: {"message": "...", "conversation_id": "..." | null}
+  Server sends:
+    - {"type": "text_delta", "text": "..."}
+    - {"type": "tool_call", "name": "...", "input": {...}}
+    - {"type": "tool_result", "name": "...", "result": {...}}
+    - {"type": "done", "conversation_id": "...", "message_id": "..."}
+    - {"type": "error", "error": "..."}
+
+Provider priority per message: local LLM > Gemini > demo (no keys) > Anthropic.
 """
 from __future__ import annotations
+
 import json
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, Header, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from jose import jwt, JWTError
 
-from ..database import get_db, async_session
-from ..models import Conversation, Message, MessageRole, User
-from ..services.security import get_current_user, SECRET_KEY, ALGORITHM
-from ..services.llm import stream_chat_response, non_streaming_chat, should_escalate_to_opus
-from ..services.tools import execute_tool
-from ..services.demo import is_demo_mode, handle_demo_message
-from ..services.gemini_llm import gemini_chat_response, has_gemini_key
-from ..services.local_llm import local_chat_response
+from ..auth import NoUserError, resolve_user_id
 from ..config import get_settings
+from ..db import copilot_session, orbit_session
+from ..models.chat import Conversation, Message, MessageRole
+from ..providers.anthropic_provider import stream_chat_response
+from ..providers.demo_provider import handle_demo_message, is_demo_mode
+from ..providers.gemini_provider import gemini_chat_response, has_gemini_key
+from ..providers.local_provider import local_chat_response
+from ..tools import execute_tool
 
+log = logging.getLogger("orbit_copilot.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
-settings = get_settings()
+
+HISTORY_LIMIT = 20  # messages of prior context sent to the model
+
+
+def _bearer(authorization: Optional[str]) -> Optional[str]:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return None
+
+
+async def _user_or_401(authorization: Optional[str]) -> str:
+    try:
+        return await resolve_user_id(_bearer(authorization))
+    except NoUserError as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 @router.get("/history")
-async def get_chat_history(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get all conversations with their messages."""
-    result = await db.execute(
-        select(Conversation)
-        .where(Conversation.user_id == current_user.id)
-        .options(selectinload(Conversation.messages))
-        .order_by(Conversation.updated_at.desc())
-    )
-    conversations = result.scalars().all()
+async def get_chat_history(authorization: Optional[str] = Header(default=None)):
+    """All of the user's conversations with their messages, newest first."""
+    user_id = await _user_or_401(authorization)
+    async with copilot_session() as db:
+        result = await db.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user_id)
+            .options(selectinload(Conversation.messages))
+            .order_by(Conversation.updated_at.desc())
+        )
+        conversations = result.scalars().all()
     return [
         {
             "id": c.id,
@@ -48,21 +76,19 @@ async def get_chat_history(
 
 
 @router.get("/history/{conversation_id}")
-async def get_conversation(
-    conversation_id: str, 
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get a single conversation with messages."""
-    result = await db.execute(
-        select(Conversation)
-        .options(selectinload(Conversation.messages))
-        .where(Conversation.id == conversation_id)
-        .where(Conversation.user_id == current_user.id)
-    )
-    conv = result.scalar_one_or_none()
+async def get_conversation(conversation_id: str, authorization: Optional[str] = Header(default=None)):
+    """One conversation with its messages."""
+    user_id = await _user_or_401(authorization)
+    async with copilot_session() as db:
+        result = await db.execute(
+            select(Conversation)
+            .options(selectinload(Conversation.messages))
+            .where(Conversation.id == conversation_id)
+            .where(Conversation.user_id == user_id)
+        )
+        conv = result.scalar_one_or_none()
     if not conv:
-        return {"error": "Conversation not found"}
+        raise HTTPException(status_code=404, detail="Conversation not found")
     return {
         "id": conv.id,
         "title": conv.title,
@@ -71,53 +97,71 @@ async def get_conversation(
     }
 
 
-@router.websocket("/ws")
-async def chat_websocket(websocket: WebSocket, token: str = None):
-    """
-    WebSocket endpoint for real-time chat streaming.
-    
-    Client sends: {"message": "...", "conversation_id": "..." | null}
-    Server sends:
-      - {"type": "text_delta", "text": "..."}
-      - {"type": "tool_call", "name": "...", "input": {...}}
-      - {"type": "tool_result", "name": "...", "result": {...}}
-      - {"type": "done", "conversation_id": "...", "message_id": "..."}
-      - {"type": "error", "error": "..."}
-    """
-    await websocket.accept()
+async def _replay(websocket: WebSocket, response_text: str, tool_calls_log: list[dict]) -> str:
+    """Send a finished (non-streamed) provider answer: tool calls first, then text word by word."""
+    for tc in tool_calls_log:
+        await websocket.send_json({"type": "tool_call", "name": tc["name"], "input": tc["input"]})
+        await websocket.send_json({"type": "tool_result", "name": tc["name"], "result": tc["result"]})
 
-    # Auto-login bypass
-    user_id = None
-    async with async_session() as db:
-        result = await db.execute(select(User.id).where(User.email == "gptchat0428@gmail.com"))
-        _id = result.scalars().first()
-        
-        if not _id:
-            result = await db.execute(select(User.id))
-            _id = result.scalars().first()
-            
-        if not _id:
-            # We must ensure the user exists
-            from ..services.security import get_password_hash
-            try:
-                user = User(
-                    email="local@orbit.ai",
-                    hashed_password=get_password_hash("local"),
-                    full_name="Local User"
-                )
-                db.add(user)
-                await db.commit()
-                await db.refresh(user)
-                user_id = user.id
-            except Exception:
-                await db.rollback()
-                result = await db.execute(select(User.id).where(User.email == "local@orbit.ai"))
-                user_id = result.scalars().first()
-                if not user_id:
-                    result = await db.execute(select(User.id))
-                    user_id = result.scalars().first()
-        else:
-            user_id = _id
+    full_text = ""
+    for i, word in enumerate(response_text.split(" ")):
+        chunk = word if i == 0 else " " + word
+        full_text += chunk
+        await websocket.send_json({"type": "text_delta", "text": chunk})
+    return full_text
+
+
+async def _anthropic_agent_loop(websocket: WebSocket, api_messages: list[dict], user_id: str,
+                                tool_calls_log: list[dict]) -> str:
+    """Stream from Claude, run any requested tools, feed results back, repeat until no tools."""
+    full_text = ""
+    while True:
+        collected_text = ""
+        tool_uses = []
+
+        async for event in stream_chat_response(api_messages):
+            if event["type"] == "text_delta":
+                collected_text += event["text"]
+                await websocket.send_json(event)
+            elif event["type"] == "tool_use":
+                tool_uses.append(event)
+                await websocket.send_json({"type": "tool_call", "name": event["name"], "input": event["input"]})
+
+        full_text += collected_text
+        if not tool_uses:
+            return full_text
+
+        assistant_content = []
+        if collected_text:
+            assistant_content.append({"type": "text", "text": collected_text})
+        for tu in tool_uses:
+            assistant_content.append({"type": "tool_use", "id": tu["id"], "name": tu["name"], "input": tu["input"]})
+        api_messages.append({"role": "assistant", "content": assistant_content})
+
+        tool_results_content = []
+        async with orbit_session() as db:
+            for tu in tool_uses:
+                result_str = await execute_tool(tu["name"], tu["input"], db, user_id)
+                tool_calls_log.append({"name": tu["name"], "input": tu["input"], "result": json.loads(result_str)})
+                tool_results_content.append({"type": "tool_result", "tool_use_id": tu["id"], "content": result_str})
+
+        for tc in tool_calls_log[-len(tool_uses):]:
+            await websocket.send_json({"type": "tool_result", "name": tc["name"], "result": tc["result"]})
+
+        api_messages.append({"role": "user", "content": tool_results_content})
+
+
+@router.websocket("/ws")
+async def chat_websocket(websocket: WebSocket, token: Optional[str] = None):
+    await websocket.accept()
+    settings = get_settings()
+
+    try:
+        user_id = await resolve_user_id(token)
+    except NoUserError as e:
+        await websocket.send_json({"type": "error", "error": str(e)})
+        await websocket.close(code=4401)
+        return
 
     try:
         while True:
@@ -130,19 +174,16 @@ async def chat_websocket(websocket: WebSocket, token: str = None):
                 continue
 
             try:
-                # ── Step 1: Save user message to DB (isolated DB block) ──
-                async with async_session() as db:
-                    # Find or create conversation (NO relationship loading)
+                # ── 1. Find or create the conversation, load history, save the user turn ──
+                async with copilot_session() as db:
                     conv_id = None
                     if conversation_id:
                         result = await db.execute(
-                            select(Conversation.id, Conversation.title)
+                            select(Conversation.id)
                             .where(Conversation.id == conversation_id)
                             .where(Conversation.user_id == user_id)
                         )
-                        row = result.first()
-                        if row:
-                            conv_id = row[0]
+                        conv_id = result.scalar_one_or_none()
 
                     if not conv_id:
                         new_conv = Conversation(user_id=user_id)
@@ -150,211 +191,60 @@ async def chat_websocket(websocket: WebSocket, token: str = None):
                         await db.flush()
                         conv_id = new_conv.id
 
-                    # Load message history directly (avoid ORM relationship)
                     msg_result = await db.execute(
                         select(Message.role, Message.content)
                         .where(Message.conversation_id == conv_id)
                         .order_by(Message.created_at.desc())
-                        .limit(20)
+                        .limit(HISTORY_LIMIT)
                     )
-                    raw_messages = msg_result.all()
-
                     history_messages = []
-                    for role, content in reversed(raw_messages):
-                        role_str = role.value if hasattr(role, 'value') else role
+                    for role, content in reversed(msg_result.all()):
+                        role_str = role.value if hasattr(role, "value") else role
                         if role_str in ("user", "assistant"):
                             history_messages.append({"role": role_str, "content": content})
 
-                    # Save user message
-                    user_msg = Message(
-                        conversation_id=conv_id,
-                        role=MessageRole.user,
-                        content=user_message,
-                    )
-                    db.add(user_msg)
+                    db.add(Message(conversation_id=conv_id, role=MessageRole.user, content=user_message))
                     await db.commit()
 
-                # Build API messages from plain data (no ORM access needed)
-                api_messages = history_messages + [{"role": "user", "content": user_message}]
-
-                # ── Step 2: Generate response (Local > Anthropic > Gemini > Demo) ──
-                _demo_mode = is_demo_mode(settings.anthropic_api_key)
-                _has_gemini = has_gemini_key()
-                full_text = ""
-                tool_calls_log = []
+                # ── 2. Generate the answer ──
+                tool_calls_log: list[dict] = []
+                demo_mode = is_demo_mode(settings.anthropic_api_key)
 
                 if settings.use_local_llm:
-                    # Privacy Mode: Local LLM
-                    async with async_session() as db:
-                        response_text, tool_calls_log = await local_chat_response(
-                            user_message, db, user_id, history=history_messages
-                        )
-
-                    for tc in tool_calls_log:
-                        await websocket.send_json({
-                            "type": "tool_call",
-                            "name": tc["name"],
-                            "input": tc["input"],
-                        })
-                        await websocket.send_json({
-                            "type": "tool_result",
-                            "name": tc["name"],
-                            "result": tc["result"],
-                        })
-
-                    words = response_text.split(' ')
-                    for i, word in enumerate(words):
-                        chunk = word if i == 0 else ' ' + word
-                        full_text += chunk
-                        await websocket.send_json({"type": "text_delta", "text": chunk})
-
-                elif _demo_mode and _has_gemini:
-                    # Gemini LLM mode: real AI with function calling
-                    async with async_session() as db:
-                        response_text, tool_calls_log = await gemini_chat_response(
-                            user_message, db, user_id, history=history_messages
-                        )
-
-                    # Send tool calls to frontend
-                    for tc in tool_calls_log:
-                        await websocket.send_json({
-                            "type": "tool_call",
-                            "name": tc["name"],
-                            "input": tc["input"],
-                        })
-                        await websocket.send_json({
-                            "type": "tool_result",
-                            "name": tc["name"],
-                            "result": tc["result"],
-                        })
-
-                    # Stream the response word by word
-                    words = response_text.split(' ')
-                    for i, word in enumerate(words):
-                        chunk = word if i == 0 else ' ' + word
-                        full_text += chunk
-                        await websocket.send_json({"type": "text_delta", "text": chunk})
-
-                elif _demo_mode:
-                    # Fallback demo mode: intent detection + tool execution
-                    async with async_session() as db:
-                        response_text, tool_calls_log = await handle_demo_message(user_message, db, user_id)
-
-                    # Send tool calls to frontend (no DB in scope)
-                    for tc in tool_calls_log:
-                        await websocket.send_json({
-                            "type": "tool_call",
-                            "name": tc["name"],
-                            "input": tc["input"],
-                        })
-                        await websocket.send_json({
-                            "type": "tool_result",
-                            "name": tc["name"],
-                            "result": tc["result"],
-                        })
-
-                    # Stream the formatted response word by word
-                    words = response_text.split(' ')
-                    for i, word in enumerate(words):
-                        chunk = word if i == 0 else ' ' + word
-                        full_text += chunk
-                        await websocket.send_json({"type": "text_delta", "text": chunk})
-
+                    async with orbit_session() as db:
+                        text, tool_calls_log = await local_chat_response(user_message, db, user_id, history=history_messages)
+                    full_text = await _replay(websocket, text, tool_calls_log)
+                elif demo_mode and has_gemini_key():
+                    async with orbit_session() as db:
+                        text, tool_calls_log = await gemini_chat_response(user_message, db, user_id, history=history_messages)
+                    full_text = await _replay(websocket, text, tool_calls_log)
+                elif demo_mode:
+                    async with orbit_session() as db:
+                        text, tool_calls_log = await handle_demo_message(user_message, db, user_id)
+                    full_text = await _replay(websocket, text, tool_calls_log)
                 else:
-                    # Live LLM mode — agentic loop
-                    while True:
-                        collected_text = ""
-                        tool_uses = []
+                    api_messages = history_messages + [{"role": "user", "content": user_message}]
+                    full_text = await _anthropic_agent_loop(websocket, api_messages, user_id, tool_calls_log)
 
-                        async for event in stream_chat_response(api_messages):
-                            if event["type"] == "text_delta":
-                                collected_text += event["text"]
-                                await websocket.send_json(event)
-                            elif event["type"] == "tool_use":
-                                tool_uses.append(event)
-                                await websocket.send_json({
-                                    "type": "tool_call",
-                                    "name": event["name"],
-                                    "input": event["input"],
-                                })
-                            elif event["type"] == "message_stop":
-                                pass
-
-                        full_text += collected_text
-
-                        if not tool_uses:
-                            break
-
-                        # Build assistant content for API history
-                        assistant_content = []
-                        if collected_text:
-                            assistant_content.append({"type": "text", "text": collected_text})
-                        for tu in tool_uses:
-                            assistant_content.append({
-                                "type": "tool_use",
-                                "id": tu["id"],
-                                "name": tu["name"],
-                                "input": tu["input"],
-                            })
-                        api_messages.append({"role": "assistant", "content": assistant_content})
-
-                        # Execute tools in isolated DB block
-                        tool_results_content = []
-                        async with async_session() as db:
-                            for tu in tool_uses:
-                                result_str = await execute_tool(tu["name"], tu["input"], db, user_id)
-                                tool_calls_log.append({
-                                    "name": tu["name"],
-                                    "input": tu["input"],
-                                    "result": json.loads(result_str),
-                                })
-                                tool_results_content.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": tu["id"],
-                                    "content": result_str,
-                                })
-
-                        # Send tool results (no DB in scope)
-                        for tc in tool_calls_log[-len(tool_uses):]:
-                            await websocket.send_json({
-                                "type": "tool_result",
-                                "name": tc["name"],
-                                "result": tc["result"],
-                            })
-
-                        api_messages.append({"role": "user", "content": tool_results_content})
-                        # Loop continues — LLM will respond to tool results
-
-                # ── Step 3: Save assistant response to DB (isolated DB block) ──
-                async with async_session() as db:
+                # ── 3. Save the assistant turn and auto-title the conversation ──
+                async with copilot_session() as db:
                     assistant_msg = Message(
                         conversation_id=conv_id,
                         role=MessageRole.assistant,
                         content=full_text,
-                        tool_calls=json.dumps(tool_calls_log) if tool_calls_log else None,
+                        tool_calls=json.dumps(tool_calls_log, default=str) if tool_calls_log else None,
                     )
                     db.add(assistant_msg)
-
-                    # Auto-title conversation
-                    result = await db.execute(
-                        select(Conversation).where(Conversation.id == conv_id)
-                    )
-                    conv = result.scalar_one()
+                    conv = (await db.execute(select(Conversation).where(Conversation.id == conv_id))).scalar_one()
                     if conv.title == "New Chat" and full_text:
                         conv.title = user_message[:60] + ("..." if len(user_message) > 60 else "")
-
                     await db.commit()
                     msg_id = assistant_msg.id
 
-                await websocket.send_json({
-                    "type": "done",
-                    "conversation_id": conv_id,
-                    "message_id": msg_id,
-                })
+                await websocket.send_json({"type": "done", "conversation_id": conv_id, "message_id": msg_id})
 
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
+            except Exception as e:  # keep the socket alive for the next message
+                log.exception("chat turn failed")
                 await websocket.send_json({"type": "error", "error": str(e)})
 
     except WebSocketDisconnect:
@@ -364,22 +254,3 @@ async def chat_websocket(websocket: WebSocket, token: str = None):
             await websocket.close()
         except Exception:
             pass
-
-
-def _build_api_messages(conversation: Conversation, new_user_message: str) -> list[dict]:
-    """Build the messages array for the Anthropic API from conversation history."""
-    messages = []
-
-    # Include recent conversation history (last 20 messages to stay within context)
-    if conversation.messages:
-        recent = list(conversation.messages)[-20:]
-        for msg in recent:
-            if msg.role == MessageRole.user:
-                messages.append({"role": "user", "content": msg.content})
-            elif msg.role == MessageRole.assistant:
-                messages.append({"role": "assistant", "content": msg.content})
-
-    # Add the new user message
-    messages.append({"role": "user", "content": new_user_message})
-
-    return messages

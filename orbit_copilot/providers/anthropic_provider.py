@@ -1,16 +1,16 @@
 """
-Anthropic LLM client with Sonnet → Opus routing.
+Anthropic (Claude) provider: streaming chat with native tool use.
 
-Default: Claude Sonnet 4.6 for all requests.
-Escalation: Claude Opus 4.6 when the model flags needs_opus=true
-            or for pre-defined complex task types.
+Uses settings.default_model for every request. should_escalate_to_opus()
+detects when a reply asks for deeper analysis, but the chat loop does not
+call it yet; Opus escalation is designed, not shipped.
 """
 from __future__ import annotations
 import json
 from anthropic import AsyncAnthropic
 from ..config import get_settings
-from ..prompts.system import SYSTEM_PROMPT
-from .tools import TOOL_SCHEMAS
+from ..prompts import SYSTEM_PROMPT
+from ..tools import TOOL_SCHEMAS
 
 
 settings = get_settings()

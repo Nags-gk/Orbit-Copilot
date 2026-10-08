@@ -10,9 +10,9 @@ import json
 import re
 from datetime import date, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from .tools import execute_tool
-from .analytics_engine import detect_anomalies, generate_insights, subscription_recommendations
-from .categorizer import auto_categorize
+from ..tools import execute_tool
+from ..analytics import detect_anomalies, generate_insights, subscription_recommendations
+from ..categorizer import auto_categorize
 
 
 # ── Intent patterns ────────────────────────────────────────
@@ -258,9 +258,9 @@ def _format_spending_summary(data: dict) -> str:
     lines.append(f"{emoji} Net Balance:     ${net:,.2f}")
     lines.append(f"📝 Transactions:    {data['transactionCount']}")
     if net >= 0:
-        lines.append(f"\n✅ You're in the green! Keep it up.")
+        lines.append("\n✅ You're in the green! Keep it up.")
     else:
-        lines.append(f"\n⚠️ You're spending more than you're earning this period.")
+        lines.append("\n⚠️ You're spending more than you're earning this period.")
     return "\n".join(lines)
 
 
@@ -270,7 +270,7 @@ def _format_category_breakdown(data: dict) -> str:
     if not cats:
         return "No expense data found for the given period."
 
-    lines = [f"📈 Expense Breakdown by Category\n"]
+    lines = ["📈 Expense Breakdown by Category\n"]
     lines.append(f"📅 {data['dateRange']['from']} → {data['dateRange']['to']}\n")
 
     bar_chars = "█"
@@ -315,7 +315,7 @@ def _format_net_worth(data: dict) -> str:
     emoji = "📈" if nw >= 0 else "📉"
 
     lines = [
-        f"💰 Net Worth Summary\n",
+        "💰 Net Worth Summary\n",
         f"🏦 Depository:   ${breakdown.get('depository', 0):,.2f}",
         f"📈 Investments:  ${breakdown.get('investment', 0):,.2f}",
         f"💳 Credit:       ${breakdown.get('credit', 0):,.2f}",
@@ -357,7 +357,7 @@ def _format_insights(data: dict) -> str:
     if not insights:
         return "📊 Not enough data yet to generate insights. Keep tracking your finances!"
 
-    lines = [f"💡 Here are your financial insights:\n"]
+    lines = ["💡 Here are your financial insights:\n"]
     for ins in insights:
         lines.append(f"{ins.get('icon', '📌')} {ins['title']}")
         lines.append(f"    {ins['description']}\n")
@@ -392,7 +392,7 @@ def _format_forecast(data: dict) -> str:
     emoji = "📈" if trend == "increasing" else "📉" if trend == "decreasing" else "➡️"
     
     lines = [
-        f"🔮 Spending Forecast (Next 30 Days)\n",
+        "🔮 Spending Forecast (Next 30 Days)\n",
         f"💵 Projected Monthly Total: ${monthly:,.2f}",
         f"📅 Daily Average Spend:     ${daily:,.2f}",
         f"{emoji} Spending Trend:          {trend.title()}",
@@ -461,7 +461,7 @@ async def handle_demo_message(message: str, db: AsyncSession, user_id: str) -> t
 
     if tool_name == "__forecast":
         # Hardcoding to 30 days as that's the default and what the UI shows
-        from .analytics_engine import forecast_spending
+        from ..analytics import forecast_spending
         result_data = await forecast_spending(db, user_id, forecast_days=30)
         return _format_forecast(result_data), []
 

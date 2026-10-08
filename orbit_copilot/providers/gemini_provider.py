@@ -7,10 +7,7 @@ with full tool-use capabilities — no more naive keyword matching.
 """
 from __future__ import annotations
 import json
-import os
-from typing import Optional
-from .tools import TOOL_SCHEMAS, execute_tool
-from .categorizer import auto_categorize
+from ..tools import TOOL_SCHEMAS, execute_tool
 from ..config import get_settings
 
 

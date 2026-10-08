@@ -6,22 +6,12 @@ inference engine like Ollama or LM Studio.
 """
 from __future__ import annotations
 import json
-import os
-from typing import Optional
-from .tools import TOOL_SCHEMAS, execute_tool
-from .gemini_llm import GEMINI_SYSTEM_PROMPT as SYSTEM_PROMPT
+from ..tools import TOOL_SCHEMAS, execute_tool
+from .gemini_provider import GEMINI_SYSTEM_PROMPT as SYSTEM_PROMPT
 from ..config import get_settings
+from ..llm_utils import clean_json_response  # noqa: F401  (re-exported for callers)
 
 settings = get_settings()
-
-def clean_json_response(result_text: str) -> str:
-    """Helper to strip markdown block wrap that local LLMs famously add to JSON responses."""
-    text = result_text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-    return text.strip()
 
 def _anthropic_to_openai_tools() -> list[dict]:
     """Convert Anthropic tool schemas into OpenAI/Ollama function definitions."""

@@ -8,13 +8,12 @@ Uses pure Python statistics (no ML dependencies) for:
 - Subscription optimization recommendations
 """
 from __future__ import annotations
-import json
 import statistics
 from datetime import date, timedelta
 from collections import defaultdict
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from ..models import Transaction, Subscription, TransactionType, TransactionCategory
+from .models.orbit import Transaction, Subscription, TransactionType
 
 
 # ── Forecasting ───────────────────────────────────────────
