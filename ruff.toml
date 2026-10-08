@@ -1,0 +1,4 @@
+# Pyflakes-level checks (real bugs: undefined names, unused imports).
+# Style rules are left off so moved code keeps its original shape and history stays readable.
+[lint]
+select = ["F", "E9"]

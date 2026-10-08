@@ -2,8 +2,8 @@ import math
 import re
 from collections import Counter
 from sqlalchemy import select
-from ..database import async_session
-from ..models import Document
+from .db import orbit_session as async_session
+from .models.orbit import Document
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r'\b\w+\b', text.lower())
@@ -42,8 +42,11 @@ async def query_documents(user_id: str, query: str, top_k: int = 2) -> list[dict
     if N == 0:
         return []
 
-    # Compute IDF
-    idf = {word: math.log(N / (count + 1)) for word, count in df.items()}
+    # Smoothed IDF (as in scikit-learn): always positive, so a term found in only
+    # some documents outweighs one found in all of them. The previous
+    # log(N / (df + 1)) gave 0 or negative weights whenever a user had one or
+    # two documents, which made search results arbitrary.
+    idf = {word: math.log((1 + N) / (1 + count)) + 1.0 for word, count in df.items()}
 
     def _get_vector(tf: dict) -> dict:
         return {w: tf[w] * idf.get(w, 0.0) for w in tf}

@@ -6,10 +6,10 @@ corresponding execution function that operates on the database.
 """
 from __future__ import annotations
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from ..models import Transaction, Subscription, TransactionType, TransactionCategory, Account, AccountType, NetWorthSnapshot
+from .models.orbit import Transaction, Subscription, TransactionType, TransactionCategory, Account, AccountType
 from .categorizer import auto_categorize
 
 
@@ -284,7 +284,7 @@ async def execute_tool(tool_name: str, tool_input: dict, db: AsyncSession, user_
 
 
 async def _search_documents(db: AsyncSession, user_id: str, query: str) -> dict:
-    from .rag_engine import query_documents
+    from .rag import query_documents
     results = await query_documents(user_id, query)
     return {"results": results}
 
@@ -612,25 +612,21 @@ async def _create_account(
     subtype: str | None = None,
     balance: float = 0.0,
 ) -> dict:
-    # Infer subtype from type if not provided
-    if not subtype:
-        type_to_subtype = {
-            "depository": "Checking",
-            "credit": "Credit Card",
-            "investment": "Brokerage",
-            "loan": "Loan",
-        }
-        subtype = type_to_subtype.get(type, "Other")
+    # Normalize the type first: models often send "Depository" or "credit card".
+    lowered = type.lower()
+    acc_type_enum = next((t for t in AccountType if t.value in lowered), None)
+    if acc_type_enum is None:
+        raise ValueError(f"Invalid account type: {type}")
 
-    try:
-        acc_type_enum = AccountType(type.lower())
-    except ValueError:
-        # Fallback for common AI casing
-        if "depository" in type.lower(): acc_type_enum = AccountType.depository
-        elif "credit" in type.lower(): acc_type_enum = AccountType.credit
-        elif "investment" in type.lower(): acc_type_enum = AccountType.investment
-        elif "loan" in type.lower(): acc_type_enum = AccountType.loan
-        else: raise ValueError(f"Invalid account type: {type}")
+    # Infer subtype from the normalized type (inferring from the raw string
+    # turned "Depository" into subtype "Other").
+    if not subtype:
+        subtype = {
+            AccountType.depository: "Checking",
+            AccountType.credit: "Credit Card",
+            AccountType.investment: "Brokerage",
+            AccountType.loan: "Loan",
+        }[acc_type_enum]
 
     acc = Account(
         user_id=user_id,
