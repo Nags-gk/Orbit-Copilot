@@ -50,6 +50,16 @@ async def test_resolve_user(token, expected):
 
 
 @pytest.mark.asyncio
+async def test_local_user_email_overrides_oldest(monkeypatch):
+    monkeypatch.setenv("LOCAL_USER_EMAIL", "bob@example.com")
+    get_settings.cache_clear()
+    assert await auth.resolve_user_id(None) == BOB
+    monkeypatch.setenv("LOCAL_USER_EMAIL", "nobody@example.com")  # unknown → oldest
+    get_settings.cache_clear()
+    assert await auth.resolve_user_id(None) == ALICE
+
+
+@pytest.mark.asyncio
 async def test_resolve_user_refuses_without_local_mode(monkeypatch):
     monkeypatch.setenv("ALLOW_LOCAL_USER", "false")
     get_settings.cache_clear()

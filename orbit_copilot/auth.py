@@ -3,8 +3,9 @@ Resolve which Orbit user a copilot request acts for.
 
 Order:
 1. A valid Orbit JWT (``sub`` = Orbit users.id, signed with ORBIT_JWT_SECRET).
-2. If ALLOW_LOCAL_USER is on (single-user local mode), the oldest Orbit user.
-   This replaces the old hardcoded-email lookup in Orbit's chat router.
+2. If ALLOW_LOCAL_USER is on (single-user local mode): the user whose email is
+   LOCAL_USER_EMAIL if set, else the oldest Orbit user. This replaces the
+   hardcoded-email lookup that used to sit in Orbit's chat router.
 3. Otherwise no user, and the caller rejects the request.
 """
 from __future__ import annotations
@@ -47,6 +48,11 @@ async def resolve_user_id(token: Optional[str]) -> str:
                 return found
 
         if settings.allow_local_user:
+            if settings.local_user_email:
+                result = await db.execute(select(User.id).where(User.email == settings.local_user_email))
+                found = result.scalar_one_or_none()
+                if found:
+                    return found
             result = await db.execute(select(User.id).order_by(User.created_at).limit(1))
             found = result.scalar_one_or_none()
             if found:

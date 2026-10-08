@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Orbit user. This mirrors Orbit's own local auto-login. Turn it off for
     # any multi-user deployment.
     allow_local_user: bool = True
+    # Optional: in local mode, act as this Orbit user instead of the oldest one.
+    # Set it to the account Orbit's dashboard shows so chat and UI match.
+    local_user_email: str = ""
 
     # ── LLM providers (priority: local > Gemini > demo > Anthropic) ──
     anthropic_api_key: str = ""

@@ -54,7 +54,7 @@ This was chosen over calling Orbit's REST API so every tool behaves exactly as i
 `auth.resolve_user_id(token)`:
 
 1. If there's a valid Orbit JWT (`sub` = Orbit `users.id`, HS256, `ORBIT_JWT_SECRET`) and that user exists, use it.
-2. Otherwise, if `ALLOW_LOCAL_USER` is on, use the oldest Orbit user. This replaces the hardcoded email that used to sit in Orbit's chat router.
+2. Otherwise, if `ALLOW_LOCAL_USER` is on, use the user whose email is `LOCAL_USER_EMAIL`, or the oldest Orbit user if that's unset or not found. This replaces the hardcoded email that used to sit in Orbit's chat router.
 3. Otherwise refuse: the WebSocket closes with code 4401 and the REST endpoints return 401.
 
 Orbit's frontend currently sends the placeholder `local-bypass-token`, which isn't a JWT, so local mode applies. That matches how Orbit behaves today.

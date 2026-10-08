@@ -48,7 +48,8 @@ The widget in Orbit connects to `ws://localhost:8001/api/chat/ws` by default. Se
 | `ORBIT_DATABASE_URL` | `../orbit/backend/orbit.db` | Orbit's database. The copilot maps 5 of its tables and never creates or migrates them. |
 | `COPILOT_DATABASE_URL` | `./copilot.db` | The copilot's own conversations and messages |
 | `ORBIT_JWT_SECRET` | Orbit's local key | Must match Orbit, so Orbit-issued tokens identify the user |
-| `ALLOW_LOCAL_USER` | `true` | No valid token → act as the oldest Orbit user (single-user local mode). Turn off for shared deployments. |
+| `ALLOW_LOCAL_USER` | `true` | No valid token → single-user local mode. Turn off for shared deployments. |
+| `LOCAL_USER_EMAIL` | empty | In local mode, act as this Orbit user; empty → the oldest user. Set it to the account your Orbit dashboard shows. |
 | `USE_LOCAL_LLM`, `LOCAL_MODEL_URL`, `LOCAL_MODEL_NAME` | off, Ollama, `llama3.1` | Fully offline mode |
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` | empty | Cloud providers |
 | `CORS_ORIGINS` | `*` | Comma-separated list for anything beyond local use |
@@ -87,7 +88,7 @@ On the Claude path, text, tool calls and tool results interleave as they happen.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q          # 43 tests
+pytest -q          # 44 tests
 ruff check orbit_copilot tests
 cd web && npm install && npm run typecheck
 ```
