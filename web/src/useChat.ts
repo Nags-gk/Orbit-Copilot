@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useAuthStore } from '../store/authStore';
 
 export interface ChatMessage {
     id: string;
@@ -25,9 +24,17 @@ interface UseChatReturn {
     clearConversation: () => void;
 }
 
-const WS_URL = 'ws://localhost:8000/api/chat/ws';
+export interface UseChatOptions {
+    /** Copilot WebSocket endpoint. Defaults to VITE_COPILOT_WS_URL, then ws://localhost:8001/api/chat/ws. */
+    wsUrl?: string;
+    /** Returns the Orbit JWT for the signed-in user. Without one the copilot falls back to its local single-user mode. */
+    getToken?: () => string | null | undefined;
+}
 
-export function useChat(): UseChatReturn {
+const ENV_WS_URL = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_COPILOT_WS_URL;
+export const DEFAULT_WS_URL = ENV_WS_URL || 'ws://localhost:8001/api/chat/ws';
+
+export function useChat({ wsUrl = DEFAULT_WS_URL, getToken }: UseChatOptions = {}): UseChatReturn {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isConnected, setIsConnected] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
@@ -35,19 +42,22 @@ export function useChat(): UseChatReturn {
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const currentAssistantIdRef = useRef<string | null>(null);
+    // Held in a ref so an inline getToken prop doesn't reconnect the socket on every render.
+    const getTokenRef = useRef(getToken);
+    getTokenRef.current = getToken;
+    // Set on unmount so the onclose handler doesn't schedule a reconnect for a dead component.
+    const disposedRef = useRef(false);
 
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-        const token = useAuthStore.getState().token;
-        if (!token) return;
-
-        const wsUrlWithToken = `${WS_URL}?token=${token}`;
-        const ws = new WebSocket(wsUrlWithToken);
+        const token = getTokenRef.current?.();
+        const url = token ? `${wsUrl}?token=${encodeURIComponent(token)}` : wsUrl;
+        const ws = new WebSocket(url);
 
         ws.onopen = () => {
             setIsConnected(true);
-            console.log('🔌 Connected to Orbit AI');
+            console.log('🔌 Connected to Orbit Copilot');
         };
 
         ws.onmessage = (event) => {
@@ -153,9 +163,11 @@ export function useChat(): UseChatReturn {
 
         ws.onclose = () => {
             setIsConnected(false);
-            console.log('🔌 Disconnected from Orbit AI');
-            // Auto-reconnect after 3 seconds
-            reconnectTimeoutRef.current = setTimeout(connect, 3000);
+            console.log('🔌 Disconnected from Orbit Copilot');
+            // Auto-reconnect after 3 seconds, unless we closed it on purpose.
+            if (!disposedRef.current) {
+                reconnectTimeoutRef.current = setTimeout(connect, 3000);
+            }
         };
 
         ws.onerror = () => {
@@ -163,14 +175,17 @@ export function useChat(): UseChatReturn {
         };
 
         wsRef.current = ws;
-    }, []);
+    }, [wsUrl]);
 
     // Connect on mount
     useEffect(() => {
+        disposedRef.current = false;
         connect();
         return () => {
+            disposedRef.current = true;
             clearTimeout(reconnectTimeoutRef.current);
             wsRef.current?.close();
+            wsRef.current = null;
         };
     }, [connect]);
 

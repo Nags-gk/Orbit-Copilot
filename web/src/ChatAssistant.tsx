@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { MessageSquare, X, Send, Trash2, Sparkles, Loader2, ChevronRight, Wrench, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
-import { useChat, type ChatMessage, type ToolCall } from '../../hooks/useChat';
-import { useVoice } from '../../hooks/useVoice';
-import { cn } from '../../lib/utils';
+import { useChat, type ChatMessage, type ToolCall, type UseChatOptions } from './useChat';
+import { useVoice } from './useVoice';
+import { cn } from './cn';
 
 const QUICK_ACTIONS = [
     { label: '📊 Spending summary', message: 'Show me my spending summary for this month' },
@@ -87,10 +87,12 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     );
 }
 
-export function ChatAssistant() {
+export type ChatAssistantProps = UseChatOptions;
+
+export function ChatAssistant(props: ChatAssistantProps = {}) {
     const [isOpen, setIsOpen] = useState(false);
     const [input, setInput] = useState('');
-    const { messages, isConnected, isLoading, sendMessage, clearConversation } = useChat();
+    const { messages, isConnected, isLoading, sendMessage, clearConversation } = useChat(props);
     const { isListening, transcript, interimTranscript, isSupported: voiceSupported, toggleListening } = useVoice(
         (finalText) => { sendMessage(finalText); }
     );
